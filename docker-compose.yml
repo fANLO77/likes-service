@@ -1,0 +1,34 @@
+version: "3.9"
+
+services:
+
+  likes-svc:
+    build:
+      context: ./likes-svc
+    container_name: likes-svc-s03
+    expose:
+      - "50051"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import grpc; c=grpc.insecure_channel('localhost:50051'); c.close()\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  gateway:
+    build:
+      context: ./gateway
+    container_name: likes-gateway
+    ports:
+      - "8154:8154"
+    environment:
+      GRPC_HOST: likes-svc
+      GRPC_PORT: "50051"
+    depends_on:
+      - likes-svc
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8154/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 3

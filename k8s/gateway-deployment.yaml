@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: likes-gateway
+  labels:
+    app: likes-app
+    component: gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: likes-app
+      component: gateway
+  template:
+    metadata:
+      labels:
+        app: likes-app
+        component: gateway
+    spec:
+      containers:
+      - name: likes-container
+        image: likes-gateway-s03:local
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 8154
+        envFrom:
+        - configMapRef:
+            name: likes-app-config
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "250m"

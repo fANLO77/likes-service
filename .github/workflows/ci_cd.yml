@@ -1,0 +1,76 @@
+name: CI/CD Pipeline
+on:
+  push:
+    branches: ["main", "master"]
+  pull_request:
+    branches: ["main", "master"]
+
+env:
+  DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install grpcio grpcio-tools fastapi uvicorn httpx pytest pytest-asyncio
+      - run: make proto
+      - run: docker compose build
+      - run: |
+          docker compose up -d
+          sleep 5
+          for i in $(seq 1 12); do curl -sf http://localhost:8154/health && break || sleep 5; done
+      - run: pytest tests/ -v
+      - run: docker compose down
+        if: always()
+
+  build-push:
+    needs: test
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: docker/build-push-action@v5
+        with:
+          context: ./likes-svc
+          push: true
+          tags: ${{ env.DOCKERHUB_USERNAME }}/likes-svc-s03:latest
+      - uses: docker/build-push-action@v5
+        with:
+          context: ./gateway
+          push: true
+          tags: ${{ env.DOCKERHUB_USERNAME }}/likes-gateway-s03:latest
+
+  deploy:
+    needs: build-push
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-kubectl@v3
+      - name: Configure kubeconfig
+        run: mkdir -p ~/.kube && echo "${{ secrets.KUBECONFIG }}" > ~/.kube/config
+      - name: Apply manifests
+        run: |
+          envsubst < k8s/configmap.yaml | kubectl apply -f -
+          envsubst < k8s/svc-deployment.yaml | kubectl apply -f -
+          envsubst < k8s/svc-service.yaml | kubectl apply -f -
+          envsubst < k8s/gateway-deployment.yaml | kubectl apply -f -
+          envsubst < k8s/gateway-service.yaml | kubectl apply -f -
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status deployment/likes-svc-s03 --timeout=120s
+          kubectl rollout status deployment/likes-gateway --timeout=120s
+      - name: Smoke test
+        run: |
+          GW_IP=$(kubectl get svc likes-gateway -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+          [ -z "$GW_IP" ] && GW_IP=$(kubectl get svc likes-gateway -o jsonpath='{.spec.clusterIP}')
+          for i in $(seq 1 10); do
+            curl -sf http://$GW_IP:8154/health && break || sleep 5
+          done

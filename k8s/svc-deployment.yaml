@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: likes-svc-s03
+  labels:
+    app: likes-app
+    component: likes-svc
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: likes-app
+      component: likes-svc
+  template:
+    metadata:
+      labels:
+        app: likes-app
+        component: likes-svc
+    spec:
+      containers:
+      - name: likes-container
+        image: likes-svc-s03:local
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 50051
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "100m"
+          limits:
+            memory: "128Mi"
+            cpu: "250m"

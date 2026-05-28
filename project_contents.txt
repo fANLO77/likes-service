@@ -1,0 +1,1473 @@
+
+============================================================
+📄 ARCHITECTURE.md
+============================================================
+# Architecture — Likes Service 
+**Project Code:** `likes-s03`
+## Общая схема
+
+```
+Client (HTTP)
+      │
+┌─────────────┐   REST (port 8154)   ┌──────────────────┐
+│   gateway   │ ─────────────────>   │  (входная точка) │
+│  FastAPI    │                      └──────────────────┘
+└──────┬──────┘
+       │  gRPC (port 50051)
+┌─────────────────┐
+│  likes-svc-s03  │
+│  Python gRPC    │
+│  (in-memory DB) │
+└─────────────────┘
+```
+
+## Сервисы
+
+### 1. `likes-svc-s03` — бизнес-логика
+
+| Атрибут     | Значение                  |
+|-------------|---------------------------|
+| Протокол    | gRPC (HTTP/2)             |
+| Порт        | 50051 (внутренний)        |
+| Хранилище   | In-memory dict            |
+| Proto-пакет | `likes.v1`                |
+| gRPC-сервис | `LikesService`            |
+
+**Методы:**
+
+| Метод        | Запрос              | Ответ               | Описание              |
+|--------------|---------------------|---------------------|-----------------------|
+| CreateLike   | `CreateLikeRequest` | `LikeResponse`      | Создать лайк          |
+| GetLike      | `GetLikeRequest`    | `LikeResponse`      | Получить по ID        |
+| ListLikes    | `ListLikesRequest`  | `ListLikesResponse` | Список всех лайков    |
+| DeleteLike   | `DeleteLikeRequest` | `DeleteLikeResponse`| Удалить по ID         |
+
+**Модель данных:**
+```proto
+message Like {
+  int32  id     = 1;
+  string target = 2; 
+}
+```
+
+---
+
+### 2. `gateway` — API Gateway
+
+| Атрибут  | Значение              |
+|----------|-----------------------|
+| Протокол | REST (HTTP/1.1)       |
+| Порт     | 8154 (публичный)      |
+| Фреймворк| FastAPI               |
+| Prefix   | `/api`                |
+
+**Маршруты:**
+
+| Метод  | Путь                | Код успеха | Описание              |
+|--------|---------------------|------------|-----------------------|
+| GET    | `/api/likes`        | 200        | Список лайков         |
+| POST   | `/api/likes`        | 201        | Создать лайк          |
+| GET    | `/api/likes/{id}`   | 200        | Получить по ID        |
+| DELETE | `/api/likes/{id}`   | 204        | Удалить               |
+| GET    | `/health`           | 200        | Health check          |
+
+---
+
+## Взаимодействие сервисов
+
+```
+Client ──POST /api/likes──> gateway ──CreateLike (gRPC)──> likes-svc
+Client <──── 201 Created ── gateway <───── LikeResponse ── likes-svc
+```
+
+- Внешние клиенты (фронтенд, curl) общаются с `gateway` по **REST**.
+- `gateway` транслирует запросы в `likes-svc` по **gRPC** — бинарный протокол, типобезопасный контракт через `.proto`.
+- `likes-svc` не экспонируется наружу (только внутренняя Docker-сеть).
+
+## Разделение
+
+| Аспект        | REST (gateway)                       | gRPC (likes-svc)                        |
+|---------------|--------------------------------------|-----------------------------------------|
+| Клиент        | Браузер, мобилка, curl               | Только внутренние сервисы               |
+| Контракт      | OpenAPI / JSON Schema                | `.proto` — строгая типизация            |
+| Производит.   | Достаточно для edge-трафика          | Быстрый бинарный формат для inter-svc   |
+| Отладка       | Легко (curl, браузер)                | Строже, нужен grpc-client или grpcurl   |
+
+## Наблюдаемость
+
+- Оба сервиса пишут структурированные логи (`logging` с уровнем INFO).
+- Docker Compose healthcheck на каждом контейнере.
+- В CI/CD пайплайне: build → test → push (GitHub Actions).
+
+## Масштабирование (опционально, K8s)
+
+При переезде в Kubernetes:
+- `likes-svc` — Deployment + ClusterIP Service (только внутренний доступ).
+- `gateway` — Deployment + LoadBalancer/Ingress (внешний доступ).
+- HPA на `gateway` по CPU/RPS.
+
+============================================================
+📄 collect_files.py
+============================================================
+#!/usr/bin/env python3
+"""
+Скрипт собирает содержимое всех текстовых файлов проекта в один output.txt.
+Файлы разделяются заголовками с их относительными путями.
+"""
+
+import os
+
+def collect_project_files(
+    root_dir: str = ".",
+    output_file: str = "project_contents.txt",
+    exclude_dirs: set = None,
+    exclude_exts: set = None
+):
+    # Настройки по умолчанию: какие папки и расширения игнорировать
+    if exclude_dirs is None:
+        exclude_dirs = {
+            ".git", "__pycache__", "node_modules", "venv", ".venv",
+            "env", ".idea", ".vscode", "dist", "build", "target"
+        }
+    if exclude_exts is None:
+        exclude_exts = {
+            ".pyc", ".pyo", ".pyd", ".so", ".dll", ".exe", ".png",
+            ".jpg", ".jpeg", ".gif", ".ico", ".svg", ".zip", ".tar",
+            ".gz", ".rar", ".pdf", ".mp4", ".mp3", ".wav", ".lock"
+        }
+
+    output_path = os.path.abspath(os.path.join(root_dir, output_file))
+    results = []
+    file_count = 0
+    total_size = 0
+
+    for dirpath, dirnames, filenames in os.walk(root_dir):
+        # Исключаем ненужные папки из обхода (модификация списка на месте)
+        dirnames[:] = [d for d in dirnames if d not in exclude_dirs]
+
+        for filename in filenames:
+            filepath = os.path.join(dirpath, filename)
+            filepath_abs = os.path.abspath(filepath)
+
+            # Не включаем сам выходной файл
+            if filepath_abs == output_path:
+                continue
+
+            ext = os.path.splitext(filename)[1].lower()
+            if ext in exclude_exts:
+                continue
+
+            rel_path = os.path.relpath(filepath, root_dir)
+
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    content = f.read()
+            except UnicodeDecodeError:
+                try:
+                    with open(filepath, "r", encoding="latin-1") as f:
+                        content = f.read()
+                    rel_path += " (latin-1)"
+                except Exception as e:
+                    content = f"[⚠️ Бинарный или нечитаемый файл: {e}]"
+            except Exception as e:
+                content = f"[⚠️ Ошибка чтения: {e}]"
+
+            total_size += len(content)
+            file_count += 1
+            results.append(f"\n{'='*60}\n📄 {rel_path}\n{'='*60}\n{content}\n")
+
+    with open(output_path, "w", encoding="utf-8") as out:
+        out.writelines(results)
+
+    print(f"✅ Готово!")
+    print(f"📁 Обработано файлов: {file_count}")
+    print(f"📄 Результат сохранён в: {output_file}")
+    print(f"⚖️ Примерный размер содержимого: {total_size / 1024:.1f} КБ")
+
+
+if __name__ == "__main__":
+    collect_project_files()
+
+============================================================
+📄 docker-compose.yml
+============================================================
+version: "3.9"
+
+services:
+
+  likes-svc:
+    build:
+      context: ./likes-svc
+    container_name: likes-svc-s03
+    expose:
+      - "50051"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import grpc; c=grpc.insecure_channel('localhost:50051'); c.close()\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  gateway:
+    build:
+      context: ./gateway
+    container_name: likes-gateway
+    ports:
+      - "8154:8154"
+    environment:
+      GRPC_HOST: likes-svc
+      GRPC_PORT: "50051"
+    depends_on:
+      - likes-svc
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8154/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+============================================================
+📄 Makefile
+============================================================
+.PHONY: up down test proto clean
+
+# Запуск всей системы
+up:
+	docker compose up --build -d
+
+# Остановка
+down:
+	docker compose down
+
+# Тесты (неделя 17 — интеграционные)
+test:
+	@echo "=== Checking required files ==="
+	@test -f ARCHITECTURE.md       && echo "OK ARCHITECTURE.md"     || (echo "MISSING ARCHITECTURE.md"; exit 1)
+	@test -f docker-compose.yml    && echo "OK docker-compose.yml"  || (echo "MISSING docker-compose.yml"; exit 1)
+	@test -f README.md             && echo "OK README.md"           || (echo "MISSING README.md"; exit 1)
+	@test -f proto/likes.proto     && echo "OK proto/likes.proto"   || (echo "MISSING proto/likes.proto"; exit 1)
+	@test -f .github/workflows/ci.yml && echo "OK CI pipeline"     || (echo "MISSING .github/workflows/ci.yml"; exit 1)
+	@echo "=== Running integration tests ==="
+	pytest tests/ -v
+
+# Перегенерировать proto stubs (нужен grpcio-tools)
+proto:
+	python -m grpc_tools.protoc -I./proto \
+	    --python_out=./likes-svc/app \
+	    --grpc_python_out=./likes-svc/app \
+	    ./proto/likes.proto
+	cp likes-svc/app/likes_pb2*.py gateway/proto_stubs/
+
+clean:
+	docker compose down --rmi local -v
+
+============================================================
+📄 questions.md
+============================================================
+# Вопросы для самопроверки
+
+1. Какие критерии вы использовали при разделении монолита на микросервисы (или при проектировании сервисов)?
+2. Почему вы выбрали именно этот стек технологий (язык, БД, протоколы)?
+3. Как ваши сервисы справляются с ошибками (retry, circuit breaker, graceful degradation)?
+4. Как организован деплой и обновление вашей системы без простоя (Zero Downtime)?
+5. Что было самым сложным в интеграции всех компонентов вместе?
+6. Что бы вы улучшили, если бы у вас был еще месяц?
+
+
+============================================================
+📄 README.md
+============================================================
+# Финальный проект
+
+## Задача
+Поздравляем! Вы дошли до финала. Теперь у вас есть набор знаний, который необходимо объединить в общую картину: REST, gRPC, Docker, K8s, CI/CD.
+Пришло время собрать всё это вместе в один финальный проект.
+
+## Ваш вариант
+`variants/<GROUP>/<STUDENT_ID>/week-17.json`
+Там описана тема вашего проекта (например, "Сервис доставки еды" или "Трекер задач").
+
+## Что нужно сделать
+1. **Архитектура**:
+   - Спроектируйте систему из 2-3 микросервисов.
+   - Опишите её в `ARCHITECTURE.md` (кто с кем общается, какие базы данных, какие протоколы).
+2. **Реализация**:
+   - Напишите код сервисов (можно переиспользовать код с прошлых недель).
+   - Выберите протокол осознанно: где-то REST для фронтенда, где-то gRPC для межсервисного общения.
+3. **Инфраструктура**:
+   - Упакуйте всё в Docker.
+   - Напишите docker-compose для локального запуска.
+   - (Опционально) Helm чарт для Кубернетиса.
+   - Настройте (или опишите) CI пайплайн.
+4. **Сдача**:
+   - Проект должен запускаться одной командой и иметь документацию.
+
+## Что сдавать
+1. Полный код проекта.
+2. `ARCHITECTURE.md`.
+3. Инструкция по запуску.
+
+## Как проверить
+```bash
+make test WEEK=17
+```
+Тест проверит наличие основных файлов и документации.
+
+
+============================================================
+📄 week-17.md
+============================================================
+# От кирпичиков к зданию
+
+В реальной жизни вы редко пишете "просто сервер". Вы строите Систему.
+Финальный проект — это возможность показать, как вы умеете принимать технические решения.
+
+## На что обратить внимание
+1. **Связность (Coupling)**: Сервисы должны быть независимыми. Если падение сервиса Уведомлений ломает создание Заказа — это плохая архитектура. Используйте очереди (RabbitMQ/Kafka) или асинхронность.
+2. **Наблюдаемость (Observability)**: Как вы поймете, что сломалось? Логи? Метрики? Трейсинг? Добавьте хотя бы базовое логирование.
+3. **Удобство разработки**: Если, чтобы запустить проект, нужно танцевать с бубном полчаса — никто не захочет с ним работать. `docker-compose up` должен решать всё.
+4. **Документация**: Код читают чаще, чем пишут. README должен отвечать на вопросы "Что это?", "Зачем это?" и "Как это запустить?".
+
+## Советы
+- Не усложняйте. Лучше работающий простой проект, чем недописанный сложный.
+- Используйте то, что изучили.
+- Получайте удовольствие от процесса! Вы создаете что-то работающее своими руками.
+
+
+============================================================
+📄 .github\workflows\ci_cd.yml
+============================================================
+name: CI/CD Pipeline
+on:
+  push:
+    branches: ["main", "master"]
+  pull_request:
+    branches: ["main", "master"]
+
+env:
+  DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install grpcio grpcio-tools fastapi uvicorn httpx pytest pytest-asyncio
+      - run: make proto
+      - run: docker compose build
+      - run: |
+          docker compose up -d
+          sleep 5
+          for i in $(seq 1 12); do curl -sf http://localhost:8154/health && break || sleep 5; done
+      - run: pytest tests/ -v
+      - run: docker compose down
+        if: always()
+
+  build-push:
+    needs: test
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: docker/build-push-action@v5
+        with:
+          context: ./likes-svc
+          push: true
+          tags: ${{ env.DOCKERHUB_USERNAME }}/likes-svc-s03:latest
+      - uses: docker/build-push-action@v5
+        with:
+          context: ./gateway
+          push: true
+          tags: ${{ env.DOCKERHUB_USERNAME }}/likes-gateway-s03:latest
+
+  deploy:
+    needs: build-push
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-kubectl@v3
+      - name: Configure kubeconfig
+        run: mkdir -p ~/.kube && echo "${{ secrets.KUBECONFIG }}" > ~/.kube/config
+      - name: Apply manifests
+        run: |
+          envsubst < k8s/configmap.yaml | kubectl apply -f -
+          envsubst < k8s/svc-deployment.yaml | kubectl apply -f -
+          envsubst < k8s/svc-service.yaml | kubectl apply -f -
+          envsubst < k8s/gateway-deployment.yaml | kubectl apply -f -
+          envsubst < k8s/gateway-service.yaml | kubectl apply -f -
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status deployment/likes-svc-s03 --timeout=120s
+          kubectl rollout status deployment/likes-gateway --timeout=120s
+      - name: Smoke test
+        run: |
+          GW_IP=$(kubectl get svc likes-gateway -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+          [ -z "$GW_IP" ] && GW_IP=$(kubectl get svc likes-gateway -o jsonpath='{.spec.clusterIP}')
+          for i in $(seq 1 10); do
+            curl -sf http://$GW_IP:8154/health && break || sleep 5
+          done
+
+============================================================
+📄 gateway\Dockerfile
+============================================================
+FROM python:3.12-slim
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir fastapi uvicorn grpcio grpcio-tools
+
+# Copy proto stubs
+COPY proto_stubs/ /app/proto_stubs/
+
+COPY main.py .
+
+EXPOSE 8154
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8154"]
+
+============================================================
+📄 gateway\main.py
+============================================================
+import logging
+import os
+
+import grpc
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+
+# Add likes-svc/app to path so we can import generated proto stubs
+import sys
+sys.path.insert(0, "/app/proto_stubs")
+
+import likes_pb2
+import likes_pb2_grpc
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger(__name__)
+
+GRPC_HOST = os.getenv("GRPC_HOST", "likes-svc")
+GRPC_PORT = os.getenv("GRPC_PORT", "50051")
+
+app = FastAPI(title="Likes Gateway", version="1.0.0")
+
+
+def get_stub():
+    channel = grpc.insecure_channel(f"{GRPC_HOST}:{GRPC_PORT}")
+    return likes_pb2_grpc.LikesServiceStub(channel)
+
+
+class LikeCreate(BaseModel):
+    target: str
+
+
+class LikeOut(BaseModel):
+    id: int
+    target: str
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
+@app.get("/api/likes", response_model=list[LikeOut])
+def list_likes():
+    try:
+        stub = get_stub()
+        resp = stub.ListLikes(likes_pb2.ListLikesRequest())
+        logger.info("list_likes count=%d", len(resp.likes))
+        return [{"id": l.id, "target": l.target} for l in resp.likes]
+    except grpc.RpcError as e:
+        logger.error("gRPC error: %s", e)
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@app.post("/api/likes", response_model=LikeOut, status_code=201)
+def create_like(body: LikeCreate):
+    try:
+        stub = get_stub()
+        resp = stub.CreateLike(likes_pb2.CreateLikeRequest(target=body.target))
+        logger.info("create_like id=%d target=%s", resp.like.id, resp.like.target)
+        return {"id": resp.like.id, "target": resp.like.target}
+    except grpc.RpcError as e:
+        logger.error("gRPC error: %s", e)
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@app.get("/api/likes/{like_id}", response_model=LikeOut)
+def get_like(like_id: int):
+    try:
+        stub = get_stub()
+        resp = stub.GetLike(likes_pb2.GetLikeRequest(id=like_id))
+        return {"id": resp.like.id, "target": resp.like.target}
+    except grpc.RpcError as e:
+        if e.code() == grpc.StatusCode.NOT_FOUND:
+            raise HTTPException(status_code=404, detail="Like not found")
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@app.delete("/api/likes/{like_id}", status_code=204)
+def delete_like(like_id: int):
+    try:
+        stub = get_stub()
+        stub.DeleteLike(likes_pb2.DeleteLikeRequest(id=like_id))
+        logger.info("delete_like id=%d", like_id)
+    except grpc.RpcError as e:
+        if e.code() == grpc.StatusCode.NOT_FOUND:
+            raise HTTPException(status_code=404, detail="Like not found")
+        raise HTTPException(status_code=502, detail=str(e))
+
+============================================================
+📄 gateway\proto_stubs\likes_pb2.py
+============================================================
+# -*- coding: utf-8 -*-
+# Generated by the protocol buffer compiler.  DO NOT EDIT!
+# NO CHECKED-IN PROTOBUF GENCODE
+# source: likes.proto
+# Protobuf Python Version: 6.31.1
+"""Generated protocol buffer code."""
+from google.protobuf import descriptor as _descriptor
+from google.protobuf import descriptor_pool as _descriptor_pool
+from google.protobuf import runtime_version as _runtime_version
+from google.protobuf import symbol_database as _symbol_database
+from google.protobuf.internal import builder as _builder
+_runtime_version.ValidateProtobufRuntimeVersion(
+    _runtime_version.Domain.PUBLIC,
+    6,
+    31,
+    1,
+    '',
+    'likes.proto'
+)
+# @@protoc_insertion_point(imports)
+
+_sym_db = _symbol_database.Default()
+
+
+
+
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0blikes.proto\x12\x08likes.v1\"\"\n\x04Like\x12\n\n\x02id\x18\x01 \x01(\x05\x12\x0e\n\x06target\x18\x02 \x01(\t\"#\n\x11\x43reateLikeRequest\x12\x0e\n\x06target\x18\x01 \x01(\t\"\x1c\n\x0eGetLikeRequest\x12\n\n\x02id\x18\x01 \x01(\x05\"\x12\n\x10ListLikesRequest\"2\n\x11ListLikesResponse\x12\x1d\n\x05likes\x18\x01 \x03(\x0b\x32\x0e.likes.v1.Like\",\n\x0cLikeResponse\x12\x1c\n\x04like\x18\x01 \x01(\x0b\x32\x0e.likes.v1.Like\"\x1f\n\x11\x44\x65leteLikeRequest\x12\n\n\x02id\x18\x01 \x01(\x05\"%\n\x12\x44\x65leteLikeResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x32\x9d\x02\n\x0cLikesService\x12\x41\n\nCreateLike\x12\x1b.likes.v1.CreateLikeRequest\x1a\x16.likes.v1.LikeResponse\x12;\n\x07GetLike\x12\x18.likes.v1.GetLikeRequest\x1a\x16.likes.v1.LikeResponse\x12\x44\n\tListLikes\x12\x1a.likes.v1.ListLikesRequest\x1a\x1b.likes.v1.ListLikesResponse\x12G\n\nDeleteLike\x12\x1b.likes.v1.DeleteLikeRequest\x1a\x1c.likes.v1.DeleteLikeResponseb\x06proto3')
+
+_globals = globals()
+_builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
+_builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'likes_pb2', _globals)
+if not _descriptor._USE_C_DESCRIPTORS:
+  DESCRIPTOR._loaded_options = None
+  _globals['_LIKE']._serialized_start=25
+  _globals['_LIKE']._serialized_end=59
+  _globals['_CREATELIKEREQUEST']._serialized_start=61
+  _globals['_CREATELIKEREQUEST']._serialized_end=96
+  _globals['_GETLIKEREQUEST']._serialized_start=98
+  _globals['_GETLIKEREQUEST']._serialized_end=126
+  _globals['_LISTLIKESREQUEST']._serialized_start=128
+  _globals['_LISTLIKESREQUEST']._serialized_end=146
+  _globals['_LISTLIKESRESPONSE']._serialized_start=148
+  _globals['_LISTLIKESRESPONSE']._serialized_end=198
+  _globals['_LIKERESPONSE']._serialized_start=200
+  _globals['_LIKERESPONSE']._serialized_end=244
+  _globals['_DELETELIKEREQUEST']._serialized_start=246
+  _globals['_DELETELIKEREQUEST']._serialized_end=277
+  _globals['_DELETELIKERESPONSE']._serialized_start=279
+  _globals['_DELETELIKERESPONSE']._serialized_end=316
+  _globals['_LIKESSERVICE']._serialized_start=319
+  _globals['_LIKESSERVICE']._serialized_end=604
+# @@protoc_insertion_point(module_scope)
+
+
+============================================================
+📄 gateway\proto_stubs\likes_pb2_grpc.py
+============================================================
+# Generated by the gRPC Python protocol compiler plugin. DO NOT EDIT!
+"""Client and server classes corresponding to protobuf-defined services."""
+import grpc
+import warnings
+
+import likes_pb2 as likes__pb2
+
+GRPC_GENERATED_VERSION = '1.78.0'
+GRPC_VERSION = grpc.__version__
+_version_not_supported = False
+
+try:
+    from grpc._utilities import first_version_is_lower
+    _version_not_supported = first_version_is_lower(GRPC_VERSION, GRPC_GENERATED_VERSION)
+except ImportError:
+    _version_not_supported = True
+
+if _version_not_supported:
+    raise RuntimeError(
+        f'The grpc package installed is at version {GRPC_VERSION},'
+        + ' but the generated code in likes_pb2_grpc.py depends on'
+        + f' grpcio>={GRPC_GENERATED_VERSION}.'
+        + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
+        + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
+    )
+
+
+class LikesServiceStub(object):
+    """Missing associated documentation comment in .proto file."""
+
+    def __init__(self, channel):
+        """Constructor.
+
+        Args:
+            channel: A grpc.Channel.
+        """
+        self.CreateLike = channel.unary_unary(
+                '/likes.v1.LikesService/CreateLike',
+                request_serializer=likes__pb2.CreateLikeRequest.SerializeToString,
+                response_deserializer=likes__pb2.LikeResponse.FromString,
+                _registered_method=True)
+        self.GetLike = channel.unary_unary(
+                '/likes.v1.LikesService/GetLike',
+                request_serializer=likes__pb2.GetLikeRequest.SerializeToString,
+                response_deserializer=likes__pb2.LikeResponse.FromString,
+                _registered_method=True)
+        self.ListLikes = channel.unary_unary(
+                '/likes.v1.LikesService/ListLikes',
+                request_serializer=likes__pb2.ListLikesRequest.SerializeToString,
+                response_deserializer=likes__pb2.ListLikesResponse.FromString,
+                _registered_method=True)
+        self.DeleteLike = channel.unary_unary(
+                '/likes.v1.LikesService/DeleteLike',
+                request_serializer=likes__pb2.DeleteLikeRequest.SerializeToString,
+                response_deserializer=likes__pb2.DeleteLikeResponse.FromString,
+                _registered_method=True)
+
+
+class LikesServiceServicer(object):
+    """Missing associated documentation comment in .proto file."""
+
+    def CreateLike(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetLike(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ListLikes(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def DeleteLike(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+
+def add_LikesServiceServicer_to_server(servicer, server):
+    rpc_method_handlers = {
+            'CreateLike': grpc.unary_unary_rpc_method_handler(
+                    servicer.CreateLike,
+                    request_deserializer=likes__pb2.CreateLikeRequest.FromString,
+                    response_serializer=likes__pb2.LikeResponse.SerializeToString,
+            ),
+            'GetLike': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetLike,
+                    request_deserializer=likes__pb2.GetLikeRequest.FromString,
+                    response_serializer=likes__pb2.LikeResponse.SerializeToString,
+            ),
+            'ListLikes': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListLikes,
+                    request_deserializer=likes__pb2.ListLikesRequest.FromString,
+                    response_serializer=likes__pb2.ListLikesResponse.SerializeToString,
+            ),
+            'DeleteLike': grpc.unary_unary_rpc_method_handler(
+                    servicer.DeleteLike,
+                    request_deserializer=likes__pb2.DeleteLikeRequest.FromString,
+                    response_serializer=likes__pb2.DeleteLikeResponse.SerializeToString,
+            ),
+    }
+    generic_handler = grpc.method_handlers_generic_handler(
+            'likes.v1.LikesService', rpc_method_handlers)
+    server.add_generic_rpc_handlers((generic_handler,))
+    server.add_registered_method_handlers('likes.v1.LikesService', rpc_method_handlers)
+
+
+ # This class is part of an EXPERIMENTAL API.
+class LikesService(object):
+    """Missing associated documentation comment in .proto file."""
+
+    @staticmethod
+    def CreateLike(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/likes.v1.LikesService/CreateLike',
+            likes__pb2.CreateLikeRequest.SerializeToString,
+            likes__pb2.LikeResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetLike(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/likes.v1.LikesService/GetLike',
+            likes__pb2.GetLikeRequest.SerializeToString,
+            likes__pb2.LikeResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListLikes(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/likes.v1.LikesService/ListLikes',
+            likes__pb2.ListLikesRequest.SerializeToString,
+            likes__pb2.ListLikesResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def DeleteLike(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/likes.v1.LikesService/DeleteLike',
+            likes__pb2.DeleteLikeRequest.SerializeToString,
+            likes__pb2.DeleteLikeResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+
+============================================================
+📄 k8s\configmap.yaml
+============================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: likes-app-config
+  labels:
+    app: likes-app
+data:
+  GRPC_HOST: "likes-svc-s03"
+  GRPC_PORT: "50051" 
+
+============================================================
+📄 k8s\gateway-deployment.yaml
+============================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: likes-gateway
+  labels:
+    app: likes-app
+    component: gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: likes-app
+      component: gateway
+  template:
+    metadata:
+      labels:
+        app: likes-app
+        component: gateway
+    spec:
+      containers:
+      - name: likes-container
+        image: ${DOCKERHUB_USERNAME}/likes-gateway-s03:latest
+        ports:
+        - containerPort: 8154
+        envFrom:
+        - configMapRef:
+            name: likes-app-config
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "250m"
+
+============================================================
+📄 k8s\gateway-service.yaml
+============================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: likes-gateway
+  labels:
+    app: likes-app
+spec:
+  selector:
+    app: likes-app
+    component: gateway
+  ports:
+  - port: 8154
+    targetPort: 8154
+    protocol: TCP
+  type: LoadBalancer 
+
+============================================================
+📄 k8s\svc-deployment.yaml
+============================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: likes-svc-s03
+  labels:
+    app: likes-app
+    component: likes-svc
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: likes-app
+      component: likes-svc
+  template:
+    metadata:
+      labels:
+        app: likes-app
+        component: likes-svc
+    spec:
+      containers:
+      - name: likes-container
+        image: ${DOCKERHUB_USERNAME}/likes-svc-s03:latest
+        ports:
+        - containerPort: 50051
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "100m"
+          limits:
+            memory: "128Mi"
+            cpu: "250m"
+
+============================================================
+📄 k8s\svc-service.yaml
+============================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: likes-svc-s03
+  labels:
+    app: likes-app
+spec:
+  selector:
+    app: likes-app
+    component: likes-svc
+  ports:
+  - port: 50051
+    targetPort: 50051
+    protocol: TCP
+  type: ClusterIP
+
+============================================================
+📄 likes-svc\Dockerfile
+============================================================
+FROM python:3.12-slim
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir grpcio grpcio-tools
+
+COPY app/ ./app/
+
+# Generate proto stubs inside the container from the already-generated files
+# (we copy pre-generated stubs directly)
+COPY app/likes_pb2.py      ./app/
+COPY app/likes_pb2_grpc.py ./app/
+
+WORKDIR /app/app
+
+EXPOSE 50051
+
+CMD ["python", "server.py"]
+
+============================================================
+📄 likes-svc\app\likes_pb2.py
+============================================================
+# -*- coding: utf-8 -*-
+# Generated by the protocol buffer compiler.  DO NOT EDIT!
+# NO CHECKED-IN PROTOBUF GENCODE
+# source: likes.proto
+# Protobuf Python Version: 6.31.1
+"""Generated protocol buffer code."""
+from google.protobuf import descriptor as _descriptor
+from google.protobuf import descriptor_pool as _descriptor_pool
+from google.protobuf import runtime_version as _runtime_version
+from google.protobuf import symbol_database as _symbol_database
+from google.protobuf.internal import builder as _builder
+_runtime_version.ValidateProtobufRuntimeVersion(
+    _runtime_version.Domain.PUBLIC,
+    6,
+    31,
+    1,
+    '',
+    'likes.proto'
+)
+# @@protoc_insertion_point(imports)
+
+_sym_db = _symbol_database.Default()
+
+
+
+
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0blikes.proto\x12\x08likes.v1\"\"\n\x04Like\x12\n\n\x02id\x18\x01 \x01(\x05\x12\x0e\n\x06target\x18\x02 \x01(\t\"#\n\x11\x43reateLikeRequest\x12\x0e\n\x06target\x18\x01 \x01(\t\"\x1c\n\x0eGetLikeRequest\x12\n\n\x02id\x18\x01 \x01(\x05\"\x12\n\x10ListLikesRequest\"2\n\x11ListLikesResponse\x12\x1d\n\x05likes\x18\x01 \x03(\x0b\x32\x0e.likes.v1.Like\",\n\x0cLikeResponse\x12\x1c\n\x04like\x18\x01 \x01(\x0b\x32\x0e.likes.v1.Like\"\x1f\n\x11\x44\x65leteLikeRequest\x12\n\n\x02id\x18\x01 \x01(\x05\"%\n\x12\x44\x65leteLikeResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x32\x9d\x02\n\x0cLikesService\x12\x41\n\nCreateLike\x12\x1b.likes.v1.CreateLikeRequest\x1a\x16.likes.v1.LikeResponse\x12;\n\x07GetLike\x12\x18.likes.v1.GetLikeRequest\x1a\x16.likes.v1.LikeResponse\x12\x44\n\tListLikes\x12\x1a.likes.v1.ListLikesRequest\x1a\x1b.likes.v1.ListLikesResponse\x12G\n\nDeleteLike\x12\x1b.likes.v1.DeleteLikeRequest\x1a\x1c.likes.v1.DeleteLikeResponseb\x06proto3')
+
+_globals = globals()
+_builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
+_builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'likes_pb2', _globals)
+if not _descriptor._USE_C_DESCRIPTORS:
+  DESCRIPTOR._loaded_options = None
+  _globals['_LIKE']._serialized_start=25
+  _globals['_LIKE']._serialized_end=59
+  _globals['_CREATELIKEREQUEST']._serialized_start=61
+  _globals['_CREATELIKEREQUEST']._serialized_end=96
+  _globals['_GETLIKEREQUEST']._serialized_start=98
+  _globals['_GETLIKEREQUEST']._serialized_end=126
+  _globals['_LISTLIKESREQUEST']._serialized_start=128
+  _globals['_LISTLIKESREQUEST']._serialized_end=146
+  _globals['_LISTLIKESRESPONSE']._serialized_start=148
+  _globals['_LISTLIKESRESPONSE']._serialized_end=198
+  _globals['_LIKERESPONSE']._serialized_start=200
+  _globals['_LIKERESPONSE']._serialized_end=244
+  _globals['_DELETELIKEREQUEST']._serialized_start=246
+  _globals['_DELETELIKEREQUEST']._serialized_end=277
+  _globals['_DELETELIKERESPONSE']._serialized_start=279
+  _globals['_DELETELIKERESPONSE']._serialized_end=316
+  _globals['_LIKESSERVICE']._serialized_start=319
+  _globals['_LIKESSERVICE']._serialized_end=604
+# @@protoc_insertion_point(module_scope)
+
+
+============================================================
+📄 likes-svc\app\likes_pb2_grpc.py
+============================================================
+# Generated by the gRPC Python protocol compiler plugin. DO NOT EDIT!
+"""Client and server classes corresponding to protobuf-defined services."""
+import grpc
+import warnings
+
+import likes_pb2 as likes__pb2
+
+GRPC_GENERATED_VERSION = '1.78.0'
+GRPC_VERSION = grpc.__version__
+_version_not_supported = False
+
+try:
+    from grpc._utilities import first_version_is_lower
+    _version_not_supported = first_version_is_lower(GRPC_VERSION, GRPC_GENERATED_VERSION)
+except ImportError:
+    _version_not_supported = True
+
+if _version_not_supported:
+    raise RuntimeError(
+        f'The grpc package installed is at version {GRPC_VERSION},'
+        + ' but the generated code in likes_pb2_grpc.py depends on'
+        + f' grpcio>={GRPC_GENERATED_VERSION}.'
+        + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
+        + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
+    )
+
+
+class LikesServiceStub(object):
+    """Missing associated documentation comment in .proto file."""
+
+    def __init__(self, channel):
+        """Constructor.
+
+        Args:
+            channel: A grpc.Channel.
+        """
+        self.CreateLike = channel.unary_unary(
+                '/likes.v1.LikesService/CreateLike',
+                request_serializer=likes__pb2.CreateLikeRequest.SerializeToString,
+                response_deserializer=likes__pb2.LikeResponse.FromString,
+                _registered_method=True)
+        self.GetLike = channel.unary_unary(
+                '/likes.v1.LikesService/GetLike',
+                request_serializer=likes__pb2.GetLikeRequest.SerializeToString,
+                response_deserializer=likes__pb2.LikeResponse.FromString,
+                _registered_method=True)
+        self.ListLikes = channel.unary_unary(
+                '/likes.v1.LikesService/ListLikes',
+                request_serializer=likes__pb2.ListLikesRequest.SerializeToString,
+                response_deserializer=likes__pb2.ListLikesResponse.FromString,
+                _registered_method=True)
+        self.DeleteLike = channel.unary_unary(
+                '/likes.v1.LikesService/DeleteLike',
+                request_serializer=likes__pb2.DeleteLikeRequest.SerializeToString,
+                response_deserializer=likes__pb2.DeleteLikeResponse.FromString,
+                _registered_method=True)
+
+
+class LikesServiceServicer(object):
+    """Missing associated documentation comment in .proto file."""
+
+    def CreateLike(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetLike(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ListLikes(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def DeleteLike(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+
+def add_LikesServiceServicer_to_server(servicer, server):
+    rpc_method_handlers = {
+            'CreateLike': grpc.unary_unary_rpc_method_handler(
+                    servicer.CreateLike,
+                    request_deserializer=likes__pb2.CreateLikeRequest.FromString,
+                    response_serializer=likes__pb2.LikeResponse.SerializeToString,
+            ),
+            'GetLike': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetLike,
+                    request_deserializer=likes__pb2.GetLikeRequest.FromString,
+                    response_serializer=likes__pb2.LikeResponse.SerializeToString,
+            ),
+            'ListLikes': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListLikes,
+                    request_deserializer=likes__pb2.ListLikesRequest.FromString,
+                    response_serializer=likes__pb2.ListLikesResponse.SerializeToString,
+            ),
+            'DeleteLike': grpc.unary_unary_rpc_method_handler(
+                    servicer.DeleteLike,
+                    request_deserializer=likes__pb2.DeleteLikeRequest.FromString,
+                    response_serializer=likes__pb2.DeleteLikeResponse.SerializeToString,
+            ),
+    }
+    generic_handler = grpc.method_handlers_generic_handler(
+            'likes.v1.LikesService', rpc_method_handlers)
+    server.add_generic_rpc_handlers((generic_handler,))
+    server.add_registered_method_handlers('likes.v1.LikesService', rpc_method_handlers)
+
+
+ # This class is part of an EXPERIMENTAL API.
+class LikesService(object):
+    """Missing associated documentation comment in .proto file."""
+
+    @staticmethod
+    def CreateLike(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/likes.v1.LikesService/CreateLike',
+            likes__pb2.CreateLikeRequest.SerializeToString,
+            likes__pb2.LikeResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetLike(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/likes.v1.LikesService/GetLike',
+            likes__pb2.GetLikeRequest.SerializeToString,
+            likes__pb2.LikeResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListLikes(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/likes.v1.LikesService/ListLikes',
+            likes__pb2.ListLikesRequest.SerializeToString,
+            likes__pb2.ListLikesResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def DeleteLike(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/likes.v1.LikesService/DeleteLike',
+            likes__pb2.DeleteLikeRequest.SerializeToString,
+            likes__pb2.DeleteLikeResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+
+============================================================
+📄 likes-svc\app\server.py
+============================================================
+import grpc
+import logging
+from concurrent import futures
+
+import likes_pb2
+import likes_pb2_grpc
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger(__name__)
+
+_store: dict[int, dict] = {}
+_counter = 0
+
+
+class LikesServicer(likes_pb2_grpc.LikesServiceServicer):
+
+    def CreateLike(self, request, context):
+        global _counter
+        _counter += 1
+        like = {"id": _counter, "target": request.target}
+        _store[_counter] = like
+        logger.info("CreateLike id=%d target=%s", _counter, request.target)
+        return likes_pb2.LikeResponse(
+            like=likes_pb2.Like(id=like["id"], target=like["target"])
+        )
+
+    def GetLike(self, request, context):
+        like = _store.get(request.id)
+        if not like:
+            context.abort(grpc.StatusCode.NOT_FOUND, f"Like {request.id} not found")
+        logger.info("GetLike id=%d", request.id)
+        return likes_pb2.LikeResponse(
+            like=likes_pb2.Like(id=like["id"], target=like["target"])
+        )
+
+    def ListLikes(self, request, context):
+        logger.info("ListLikes count=%d", len(_store))
+        return likes_pb2.ListLikesResponse(
+            likes=[likes_pb2.Like(id=v["id"], target=v["target"]) for v in _store.values()]
+        )
+
+    def DeleteLike(self, request, context):
+        if request.id not in _store:
+            context.abort(grpc.StatusCode.NOT_FOUND, f"Like {request.id} not found")
+        del _store[request.id]
+        logger.info("DeleteLike id=%d", request.id)
+        return likes_pb2.DeleteLikeResponse(success=True)
+
+
+def serve():
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+    likes_pb2_grpc.add_LikesServiceServicer_to_server(LikesServicer(), server)
+    server.add_insecure_port("[::]:50051")
+    logger.info("gRPC LikesService listening on :50051")
+    server.start()
+    server.wait_for_termination()
+
+
+if __name__ == "__main__":
+    serve()
+
+============================================================
+📄 proto\likes.proto
+============================================================
+syntax = "proto3";
+
+package likes.v1;
+
+
+service LikesService {
+  rpc CreateLike (CreateLikeRequest) returns (LikeResponse);
+  rpc GetLike    (GetLikeRequest)    returns (LikeResponse);
+  rpc ListLikes  (ListLikesRequest)  returns (ListLikesResponse);
+  rpc DeleteLike (DeleteLikeRequest) returns (DeleteLikeResponse);
+}
+
+message Like {
+  int32  id     = 1;
+  string target = 2;
+}
+
+message CreateLikeRequest {
+  string target = 1;
+}
+
+message GetLikeRequest {
+  int32 id = 1;
+}
+
+message ListLikesRequest {}
+
+message ListLikesResponse {
+  repeated Like likes = 1;
+}
+
+message LikeResponse {
+  Like like = 1;
+}
+
+message DeleteLikeRequest {
+  int32 id = 1;
+}
+
+message DeleteLikeResponse {
+  bool success = 1;
+}
+
+
+============================================================
+📄 starter\ARCHITECTURE.md
+============================================================
+# Архитектура
+
+## Обзор
+Система состоит из следующих микросервисов:
+1. **User Service**: Управление пользователями.
+2. **Order Service**: Создание и процессинг заказов.
+3. **Notification Service**: Отправка Email/Push.
+
+## Диаграмма взаимодействия
+[Клиент] -> [API Gateway] -> [Order Service]
+                                |
+                                v
+                         [Notification Service]
+
+## Технологический стек
+- **Язык**: Python (FastAPI)
+- **База данных**: PostgreSQL
+- **Очередь сообщений**: RabbitMQ
+- **Контейнеризация**: Docker + Compose
+
+## Решения
+- Выбран **gRPC** для общения между Order и Notification, так как важна скорость.
+- Выбран **REST** для внешнего API, так как это удобно для фронтенда.
+
+
+============================================================
+📄 tests\test_integration.py
+============================================================
+"""
+Integration tests for the Likes service (gateway REST API).
+Run with:
+    pytest tests/ -v
+The gateway must be accessible at GATEWAY_URL (default http://localhost:8154).
+"""
+
+import os
+import pytest
+import httpx
+
+BASE = os.getenv("GATEWAY_URL", "http://localhost:8154")
+
+
+@pytest.fixture(scope="session")
+def client():
+    with httpx.Client(base_url=BASE, timeout=10) as c:
+        yield c
+
+
+def test_health(client):
+    r = client.get("/health")
+    assert r.status_code == 200
+    assert r.json()["status"] == "ok"
+
+
+def test_create_like(client):
+    r = client.post("/api/likes", json={"target": "post-42"})
+    assert r.status_code == 201
+    body = r.json()
+    assert body["target"] == "post-42"
+    assert "id" in body
+
+
+def test_list_likes(client):
+    # Ensure at least one like exists
+    client.post("/api/likes", json={"target": "list-test"})
+    r = client.get("/api/likes")
+    assert r.status_code == 200
+    assert isinstance(r.json(), list)
+    assert len(r.json()) >= 1
+
+
+def test_get_like(client):
+    created = client.post("/api/likes", json={"target": "get-test"}).json()
+    like_id = created["id"]
+    r = client.get(f"/api/likes/{like_id}")
+    assert r.status_code == 200
+    assert r.json()["id"] == like_id
+    assert r.json()["target"] == "get-test"
+
+
+def test_get_like_not_found(client):
+    r = client.get("/api/likes/999999")
+    assert r.status_code == 404
+
+
+def test_delete_like(client):
+    created = client.post("/api/likes", json={"target": "delete-test"}).json()
+    like_id = created["id"]
+    r = client.delete(f"/api/likes/{like_id}")
+    assert r.status_code == 204
+    # second delete → 404
+    r2 = client.delete(f"/api/likes/{like_id}")
+    assert r2.status_code == 404
+
+============================================================
+📄 tests\test_week_17.py
+============================================================
+from pathlib import Path
+from coursekit.koan import need
+from coursekit.variant import load_variant
+
+ROOT = Path(__file__).resolve().parents[3]
+ARCH = ROOT / 'weeks' / 'week-17' / 'ARCHITECTURE.md'
+
+
+def test_capstone_arch():
+    need(ARCH.exists(), f"Создайте ARCHITECTURE.md: {ARCH}")
+    v = load_variant("17")
+    text = ARCH.read_text()
+    need(v['project_code'] in text, "В архитектуре укажите project_code из варианта.")
+

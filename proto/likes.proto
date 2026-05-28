@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package likes.v1;
+
+
+service LikesService {
+  rpc CreateLike (CreateLikeRequest) returns (LikeResponse);
+  rpc GetLike    (GetLikeRequest)    returns (LikeResponse);
+  rpc ListLikes  (ListLikesRequest)  returns (ListLikesResponse);
+  rpc DeleteLike (DeleteLikeRequest) returns (DeleteLikeResponse);
+}
+
+message Like {
+  int32  id     = 1;
+  string target = 2;
+}
+
+message CreateLikeRequest {
+  string target = 1;
+}
+
+message GetLikeRequest {
+  int32 id = 1;
+}
+
+message ListLikesRequest {}
+
+message ListLikesResponse {
+  repeated Like likes = 1;
+}
+
+message LikeResponse {
+  Like like = 1;
+}
+
+message DeleteLikeRequest {
+  int32 id = 1;
+}
+
+message DeleteLikeResponse {
+  bool success = 1;
+}
