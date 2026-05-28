@@ -53,7 +53,7 @@ def test_get_like_not_found(client):
     r = client.get("/api/likes/999999")
     assert r.status_code == 404
 
-
+#
 def test_delete_like(client):
     created = client.post("/api/likes", json={"target": "delete-test"}).json()
     like_id = created["id"]
