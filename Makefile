@@ -1,14 +1,11 @@
 .PHONY: up down test proto clean
 
-# Запуск всей системы
 up:
 	docker compose up --build -d
 
-# Остановка
 down:
 	docker compose down
 
-# Тесты (неделя 17 — интеграционные)
 test:
 	@echo "=== Checking required files ==="
 	@test -f ARCHITECTURE.md       && echo "OK ARCHITECTURE.md"     || (echo "MISSING ARCHITECTURE.md"; exit 1)
@@ -19,7 +16,6 @@ test:
 	@echo "=== Running integration tests ==="
 	pytest tests/ -v
 
-# Перегенерировать proto stubs (нужен grpcio-tools)
 proto:
 	python -m grpc_tools.protoc -I./proto \
 	    --python_out=./likes-svc/app \

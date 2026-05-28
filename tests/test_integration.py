@@ -33,7 +33,6 @@ def test_create_like(client):
 
 
 def test_list_likes(client):
-    # Ensure at least one like exists
     client.post("/api/likes", json={"target": "list-test"})
     r = client.get("/api/likes")
     assert r.status_code == 200
@@ -60,6 +59,5 @@ def test_delete_like(client):
     like_id = created["id"]
     r = client.delete(f"/api/likes/{like_id}")
     assert r.status_code == 204
-    # second delete → 404
     r2 = client.delete(f"/api/likes/{like_id}")
     assert r2.status_code == 404
