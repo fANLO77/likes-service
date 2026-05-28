@@ -74,3 +74,4 @@ jobs:
           for i in $(seq 1 10); do
             curl -sf http://$GW_IP:8154/health && break || sleep 5
           done
+        
